@@ -1,0 +1,59 @@
+name: Version veröffentlichen
+
+# Startet nur von Hand: Actions → „Version veröffentlichen“ → „Run workflow“.
+# Nimmt die vorbereitete Version aus dem Zweig „upload“ (version.txt, notizen.md, APK),
+# prüft die Signatur und legt daraus das Release an.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency: veroeffentlichen
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  veroeffentlichen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Vorbereitete Version suchen
+        run: |
+          if ! git ls-remote --exit-code --heads "https://github.com/${GITHUB_REPOSITORY}.git" upload > /dev/null; then
+            echo "::error::Es liegt keine neue Version zum Veröffentlichen bereit."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: upload
+
+      - name: Version und Signatur prüfen
+        run: |
+          VERSION=$(tr -d '[:space:]' < version.txt)
+          APK="Bootsradar-$VERSION.apk"
+          test -f "$APK" || { echo "::error::$APK fehlt."; exit 1; }
+          test -s notizen.md || { echo "::error::notizen.md fehlt."; exit 1; }
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          "$BT/apksigner" verify --print-certs "$APK" | tee pruefung.txt
+          # Nur mit dem Bootsradar-Schlüssel signierte APKs, sonst klappen Updates nicht
+          grep -q 'SHA-256 digest: e28a969633709d3a9723d801fe2108aedfac2daaaf4ed73283661c3da3c40f95' pruefung.txt \
+            || { echo "::error::Die APK ist nicht mit dem Bootsradar-Schlüssel signiert."; exit 1; }
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Release anlegen
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::Version $VERSION ist schon veröffentlicht."
+            exit 1
+          fi
+          gh release create "v$VERSION" "Bootsradar-$VERSION.apk" --repo "$GITHUB_REPOSITORY" \
+            --target main --title "Bootsradar $VERSION" --notes-file notizen.md --latest
+          echo "Veröffentlicht: https://github.com/$GITHUB_REPOSITORY/releases/tag/v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Zweig „upload“ aufräumen
+        run: git push origin --delete upload
